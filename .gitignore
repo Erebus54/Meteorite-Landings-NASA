@@ -3,7 +3,7 @@
 .Rapp.history
 
 # Ignore rendered html report
-.Cluster-Analysis-on-Meteorites
+*.Cluster-Analysis-on-Meteorites
 
 # Session Data files
 .RData
