@@ -1,0 +1,436 @@
+---
+title: 'Cluster Analysis on Meteorites'
+author: "Patrick Reza Schnurbusch"
+date: "Compiled: `r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+      theme: cosmo
+      code_folding: hide
+---
+
+This dataset was obtained from Kaggle [here](https://www.kaggle.com/nasa/meteorite-landings) and includes the lat/lon coordinates of meteorite impact sites.  
+
+There 45,000 impact sites and in this analysis we will be analyzing the ones inside of the continential United States.  
+
+Our goal is to apply point-pattern analysis and areal statistics to this dataset. 
+
+The dataset also contains the following variables:
+
+* name: the name of the meteorite (typically a location, often modified with a number, year, composition, etc)
+id: a unique identifier for the meteorite
+
+* nametype: one of:
+  * valid: a typical meteorite
+  * relict: a meteorite that has been highly degraded by weather on Earth
+  
+* recclass: the class of the meteorite; one of a large number of [meteorite classifications](https://en.wikipedia.org/wiki/Meteorite_classification) based on physical, chemical, and other characteristics 
+
+* mass: the mass of the meteorite (grams)
+
+* fall: 
+  * Fell - the meteorite's was observed before impact midfall
+  * Found: the meteorite's was observed after impact
+
+* year: the year the meteorite fell, or the year it was found (depends on the value of fell)
+* reclat: the latitude of the meteorite's landing
+* reclong: the longitude of the meteorite's landing
+* GeoLocation: a parentheses-enclose, comma-separated value of the reclat & reclong
+
+```{r setup, include=FALSE}
+library(Amelia) # For missing values map 
+library(dplyr) # data manipulation 
+library(plotly) # interactive graphics 
+
+library(leaflet) # interactive maps 
+library(leaflet.providers) # provider tiles 
+library(leaflet.extras) # extra functions 
+
+library(RColorBrewer) # color pallettes 
+library(sf) # simple features 
+library(sp) # point selection
+library(USAboundaries) # get USA bounds 
+library(spatstat) # point pattern analysis 
+
+# 1. Download File: 
+# --------------------------------------------------------------------
+meteorites <- read.csv("./meteorite-landings.csv", encoding = "UTF-8")
+```
+
+# Data Cleaning 
+
+##  <b> Missing Values </b> {.tabset}
+
+Since our missing values make up only ~1% of our total dataset, this number is low enough where we can simply filter these data-points out of our dataset and proceed without the need over imputation. We remove the missing values from our dataset and run a missing values map to confirm. 
+
+###  Table 
+```{r, message=FALSE}
+sapply(meteorites, function(y) sum(length(which(is.na(y))))) %>% 
+  data.frame() %>% 
+  dplyr::rename(NA_COUNT = 1) %>% 
+  dplyr::arrange(desc(NA_COUNT))
+```
+
+### MissMap
+
+```{r}
+missmap(meteorites, 
+        main = "Missingness Map of Meteorite Impact Dataset",
+        legend = T, 
+        y.labels = NULL, 
+        y.at = NULL,
+        col = c("#ff6961", "#84d9ff"))
+```
+
+##  <b> Confirmation </b>  {.tabset}
+
+###  Table 
+```{r}
+# Clean NA values
+
+# Filtering out missing values 
+meteorites_clean <- meteorites %>% 
+  dplyr::filter(!is.na(year)) %>% 
+  dplyr::filter(!is.na(mass)) %>% 
+  dplyr::filter(!is.na(reclat)) %>% 
+  dplyr::filter(!is.na(reclong)) 
+
+sapply(meteorites_clean, function(y) sum(length(which(is.na(y))))) %>% 
+  data.frame() %>% 
+  dplyr::rename(NA_COUNT = 1) %>% 
+  dplyr::arrange(desc(NA_COUNT))
+```
+
+### MissMap 
+```{r}
+missmap(meteorites_clean, 
+        main = "Missingness Map of Meteorite Impact Dataset",
+        legend = T, 
+        y.labels = NULL, 
+        y.at = NULL,
+        col = c("#ff6961", "#84d9ff"))
+```
+
+## <b> Change Date </b> 
+
+Lastly we'll need to replace the Year column, as it is in YYYY-mm-ddT00:00:00.000 format. We can do this by extracting the first four characters and replacing them with the values obtained and cast that to an integer format. 
+
+```{r}
+# Replace Year column
+meteorites_clean$year <- substr(meteorites_clean$year, start = 0, stop = 4)
+# cast character to integer 
+meteorites_clean$year <- as.numeric(meteorites_clean$year)
+```
+
+However are not done yet, if we run `summary()` we can see 2 (two) main issues: 
+
+```{r}
+summary(meteorites_clean)
+```
+1. We can see some meteorites have a mass of 0 grams, this could be because the actual mass was so small it did not register past a decimal point. To correct this we can filter these objects out. 
+
+2. We can also see that our data starts at 601 and ends at 2101. 
+
+We will use 2016 as our 'ceiling' or the max point we want to find out. We can remove these rows and then make a density plot to see where our 'floor' should, that is to mean the lowest values we want filtered out. 
+```{r}
+meteorites_clean <- meteorites_clean %>% 
+  dplyr::filter(mass != 0) %>% # Filter out 0g observations 
+  dplyr::filter(!is.na(year))  # Filter out NA 
+
+```
+
+
+## <b> Selecting Timeframe </b> 
+
+Since the NASA was founded in 1958, I think it would be prudent to start with impacts starting after that year. We can create a density plot to gauge the frequency of impacts over all time. 
+
+```{r}
+density <- density(meteorites_clean$year)
+
+plot_ly(x = ~density$x, y = ~density$y, type = 'scatter', 
+        mode = 'lines', fill = 'tozeroy', 
+        fillcolor = "#DB4437", 
+        line = list(color = 'white')) %>%
+   
+layout(title = "Meteorite Impact Frequency over Time (600 - 2016)",
+       hovermode = "x-unified",
+       titlefont = list(family = "Agency FB", 
+                        size = 25, 
+                        color = '#ffffff'),
+       font = list(family = "Agency FB", size = 15),
+       margin = 10,
+       paper_bgcolor='black',
+       plot_bgcolor='black',
+       xaxis = list(title = "Year", 
+                    color = '#ffffff'),
+       yaxis = list(title = "Density of Impacts", 
+                    color = '#ffffff'))
+```
+
+We can see a definite uptick in our data from 1960's and a slide starting in 2000's. Let's repeat this but filter for 1770 or later to get a zoomed in view. 
+
+```{r}
+meteorites_clean <- meteorites_clean %>% 
+  dplyr::filter(year >= 1960 & year <= 2016)
+```
+
+```{r}
+density <- density(meteorites_clean$year)
+
+plot_ly(x = ~density$x, y = ~density$y, type = 'scatter', 
+        mode = 'lines', fill = 'tozeroy', 
+        fillcolor = "#4285F4", 
+        line = list(color = 'white')) %>%
+  
+  layout(title = "Meteorite Impact Frequency over Time (1960 - 2016)",
+         hovermode = "x-unified",
+         titlefont = list(family = "Agency FB", 
+                          size = 25, 
+                          color = '#ffffff'),
+         font = list(family = "Agency FB", size = 15),
+         margin = 10,
+         paper_bgcolor='black',
+         plot_bgcolor='black',
+         xaxis = list(title = "Year", 
+                      color = '#ffffff'),
+         yaxis = list(title = "Density of Impacts", 
+                      color = '#ffffff'))
+```
+
+
+## <b> Selecting US bound Meteorites </b>
+
+Last step of our data cleaning process workflow is to subset/select those points that have fallen inside the USA. More specifically, we are looking for those that have fallen in the continental/contiguous USA area.    
+
+To do this I will pull USA GIS data and filter out for those states not in the contigous USA, then we will dissolve the shapes into 1 polygon from which we can filter our points on. 
+
+```{r}
+# Donwloand America 
+
+# Exclude following state polygons 
+exclusion <- c("Alaska", "Hawaii", "Puerto Rico")
+america_bounds <- USAboundaries::us_boundaries(type = "state", resolution = "low") %>% 
+  # Exclude non-contiguous states 
+  dplyr::filter(!name %in% exclusion) %>% 
+  # Set the coordinate reference system (crs)
+  st_transform(crs = 4326)
+
+# Dissolve boundaries into 1 polygon 
+america_bounds <- america_bounds %>% 
+  st_union()
+
+meteorites_sf <- meteorites_clean %>% 
+  st_as_sf(coords = c("reclong", "reclat"), crs = 4326) 
+
+# set a 5km buffer around each point 
+buffer <- st_buffer(meteorites_sf, dist = 5000) 
+
+# Filter out for points that are inside our observation area 
+meteorites_sf$in_bounds <- st_intersects(meteorites_sf, america_bounds, sparse = F) 
+
+meteorites_usa <- meteorites_sf %>% 
+  dplyr::filter(in_bounds == TRUE)
+```
+
+Now with out dataset properly cleaned and prepped we can move onto the Exploratory Data Analaysis (EDA) step. 
+
+# Exploratory Data Analysis (EDA)
+
+First let's examine the frequency over time 
+```{r}
+impacts_over_time <- meteorites_usa %>% 
+  dplyr::select(year) %>% 
+  data.frame() %>% 
+  dplyr::group_by(year) %>% 
+  dplyr::summarise(impacts = n()) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::arrange(year)
+
+plot_ly(impacts_over_time, x = ~year, y = ~impacts, type = 'bar', 
+        marker = list(color = '#ADFF2F'), 
+        name = "") %>% 
+  layout(hovermode = "x-unified",
+         title = "Meteorite Impacts in America Over Time",
+         font = list(family = "Agency FB", size = 20, color = "#ffffff"), 
+         margin = 10,
+         paper_bgcolor='black',
+         plot_bgcolor='black',
+         xaxis = list(title = "", 
+                      color = '#ffffff'),
+         yaxis = list(title = "No. of Impacts", 
+                      color = '#ffffff'))
+
+```
+
+We'll map out all <b> `r nrow(meteorites_usa)`</b> points on a map to see how the data appears.
+
+## Mass {.tabset}
+
+### Impacts by Mass
+
+Here we have mapped out the impact sites, color coding and scaling the size of each point by the mass (g).  
+
+```{r, fig.width = 8}
+pal <- colorNumeric(palette = "viridis", domain = meteorites_usa$mass, reverse = F)
+
+leaflet(data = meteorites_usa) %>% 
+  addFullscreenControl(position = "topright") %>% 
+  addResetMapButton() %>% 
+  addProviderTiles(providers$CartoDB.DarkMatter)%>% 
+  addCircleMarkers(color = ~pal(mass), 
+                   radius = meteorites_usa$mass/1e5, 
+                   stroke = FALSE, fillOpacity = 1) %>% 
+  
+  addLegend("bottomright", pal = pal, values = ~mass,
+            title = "Mass (grams) <hr>",
+            labFormat = labelFormat(suffix = " g"),
+            opacity = 1)
+```
+We can see some clustering along the border between New Mexico & Texas but mostly it's sporadic and random everywhere else. We also see an impact in California that is massive relatively speakin, clocking in at a mass of <b>`r paste(format(max(meteorites_usa$mass), big.mark = ","),"grams", sep = " ")` ~ `r paste(format(max(meteorites_usa$mass/1000), big.mark = ","),"kg", sep = " ")`</b>     
+
+## Impact Mass Distribution 
+
+Below we have boxplotted the points to gauge the frequency. We can see that the mass clusters below 50K grams, with the median being ~300g. 
+
+```{r}
+plot_ly(meteorites_usa) %>% 
+        add_boxplot(y = ~mass, jitter = 0.5, pointpos = -1.8, boxpoints = 'all', 
+                    marker = list(color = '#36C5F0'), 
+                    line = list(color = '#FFFC00'), 
+                    name = "mass(g)") %>% 
+        layout(yaxis = list(title = 'mass(g)')) %>% 
+        
+        layout(plot_bgcolor='black') %>% 
+        layout(paper_bgcolor='black') 
+```
+
+### Meteorites by Observed Status 
+
+In our dataset meteorites are coded via whether they were spotted on the ground after impact ("found") or while in the mid-fall ("fell)
+
+Overwhelmingly we can see most meteorites were spotted while on the ground after-impact was made, we have modified the size argument to help make the quantity more acute on our map. 
+```{r, fig.width = 8}
+pal <- colorFactor(c("yellow", "red"), domain = c("Fell", "Found"))
+labels <- c("Mid-Air", "Ground")
+leaflet(data = meteorites_usa) %>% 
+        addFullscreenControl(position = "topright") %>% 
+        addResetMapButton() %>% 
+        addProviderTiles(providers$CartoDB.DarkMatter) %>% 
+        addCircleMarkers(color = ~pal(fall), 
+                         radius = ~ifelse(fall == "Found", 2, 4),
+                         stroke = TRUE, fillOpacity = 1, weight = 1) %>% 
+        
+        addLegend("bottomright", pal = pal, values = ~fall,
+                  title = "<u>Found Status</u>",
+                  opacity = 1, 
+                  labFormat = function(type, cuts, p){
+                          paste0(labels)})
+```
+
+## Distribution of Meteorites by Years 
+
+Here we can interestingly that the more recent impact sites are now impacting California/Arizona and that the datapoints along New Mexico /Arizona are mostly 'older' impact sites. 
+```{r}
+pal <- colorBin(
+        palette = "plasma",bins = 5,
+        domain = meteorites_usa$year, reverse = F)
+
+leaflet(data = meteorites_usa) %>% 
+        addFullscreenControl(position = "topright") %>% 
+        addResetMapButton() %>% 
+        addProviderTiles(providers$CartoDB.DarkMatter) %>% 
+        addCircleMarkers(color = ~pal (year), 
+                         radius = 3,
+                         stroke = FALSE, fillOpacity = 1) %>% 
+        
+        addLegend("bottomright", pal = pal, values = ~year,
+                  title = "<u>Year Found</u>",
+                  labFormat = labelFormat(),
+                  opacity = 0.9)
+```
+
+## Impacts over Time {.tabset}
+
+```{r}
+plot_ly(data = meteorites_usa,
+        x = ~year,
+        type = "histogram",
+        cumulative = list(enabled=TRUE), 
+        marker = list(color = '#006AFF'), 
+        name = "Cumulative") %>%
+        
+        add_trace(data = meteorites_usa,
+                  x = ~year,
+                  type = "histogram", 
+                  cumulative = list(enabled=F), 
+                  marker = list(color = '#00ffff'),
+                  name = "Per Year") %>% 
+        
+        layout(title = "Meteorite Impacts in America (1960 - 2016)",
+               titlefont = list(
+                       family = "Agency FB", 
+                       size = 45, 
+                       color = '#ffffff'),
+               font = list(family = "Agency FB", 
+                           size = 25),
+               margin = 10,
+               paper_bgcolor='black',
+               plot_bgcolor='black',
+               xaxis = list(title = "Year", 
+                            color = '#ffffff'),
+               yaxis = list(title = "No. of Impacts", 
+                            color = '#ffffff'))
+```
+
+## Meteorite Classifications
+
+one of a large number of [meteorite classifications](https://en.wikipedia.org/wiki/Meteorite_classification) based on physical, chemical, and other characteristics 
+
+Meteorites have a classification system based on the mineralogical, petrological, chemical, and isotopic properties of the meteorite. Here we have calculated the frequency for each class in our dataset and filtered for the top 10 most represented classes in our data. We visualize this distribution in a pie chart. 
+
+Our top 10 most frequent classes by number of impacts were: 
+1. H5 (202)
+2. L6 (164)
+3. H4 (125)
+4. H6 (93)
+5. L5 (92)
+6. 0C (37)
+7. L4 (36)
+8. Iron, IIIAB (20)
+9. CK4 (11)
+10. LL6 (10)
+
+```{r}
+# Create a frequency for our class variable 
+class_freq_table <- meteorites_usa %>% 
+        dplyr::group_by(recclass) %>% 
+        dplyr::tally() %>% 
+        dplyr::ungroup() %>% 
+        dplyr::arrange(desc(n)) %>% 
+        dplyr::top_n(n = 10, wt = n)
+colors =  brewer.pal(10, "Spectral")
+plot_ly(class_freq_table, labels = ~recclass, values = ~n, type = 'pie',
+        textposition = 'inside',
+        textinfo = 'label+percent',
+        insidetextfont = list(color = '#FFFFFF'),
+        # height = 500, width = 910,
+        
+        marker = list(colors = colors,line = list(color = 'white', width = 2)),
+        showlegend = FALSE, 
+        hoverinfo = 'text',
+        text = ~paste('<b>Meteorite Classification:</b>', recclass, "<br>", 
+                      "<b>No. of Impacts:</b>", n, "</br>", 
+                      "<b>No. of Impacts:</b>", round(n/sum(n)*100, 1),"%", "</br>")) %>% 
+        
+        layout(title = 'Meteorites Classes in USA (1960 - 2016)',
+                      xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+                      yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE)) %>% 
+        
+        layout(titlefont = list(family = "Agency FB", 
+                                size = 20, 
+                                color = '#ffffff'),
+               font = list(family = "Agency FB", 
+                           size = 12),
+               margin = 10,
+               paper_bgcolor='black',
+               plot_bgcolor='black')
+```
