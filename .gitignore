@@ -1,8 +1,10 @@
 # History files
 .Rhistory
 .Rapp.history
+
 # Ignore rendered html report
-Cluster-Analysis-on-Meteorites/**/*.html
+.Cluster-Analysis-on-Meteorites
+
 # Session Data files
 .RData
 # User-specific files
